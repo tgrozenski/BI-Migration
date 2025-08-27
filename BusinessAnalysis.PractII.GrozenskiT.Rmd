@@ -1,0 +1,363 @@
+---
+title: "Analysis of Film and Music Sales for Media Distributors, Inc."
+author: "Tyler Grozenski"
+date: "Summer 2025"
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+    theme: united
+---
+
+```{r setup, eval = TRUE, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(DBI)
+library(RMySQL)
+library(knitr)
+library(kableExtra)
+
+hostname <- "mysql-practicum1-tgrozenski-practicum1-tg.g.aivencloud.com"
+port <- 25306
+username <- "avnadmin"
+password <- "AVNS_fg_Htu4YZyLpVQ2H6g6"
+dbname <- "defaultdb"
+
+# Establish all 3 database connections
+con <- dbConnect(RMySQL::MySQL(),
+                    host = hostname,
+                    port = port,
+                    user = username,
+                    password = password,
+                    dbname = dbname,
+                    timeout = 10)
+```
+
+# 1. Background
+
+Media Distributors, Inc. is a Wichita, KY based distributor and seller of films and music for commercial purposes. For the past few years, it has managed its film and music sales separately using different applications. This division is historical as Media Distributors started distributing films and then acquired SoundMania about two years ago. As the two distribution channels were different, CTO Alvin Coelho made the decision not to integrate the SoundMania’s information systems and database with those of Media Distributors. This has not been a problem until now, however Media Distributors intends to make itself available for acquisition. To that end, an integrated view of the business, particularly sales, is needed.
+
+This report provides key sales, revenue, and customer metrics to showcase Media Distributors business. The analysis provided is based on data from a custom-built datamart containing data extracted from two operational databases.
+
+# 2. Key Business Metrics
+
+This sections provides key revenue and customer information segmented by time, country, and business unit. Revenue numbers are in US$.
+
+## 2.1. Sales Revenue
+```{r calc_yearly_facts, eval = TRUE, echo=TRUE, warning=FALSE}
+# Getting 2 most recent years
+available_years <- dbGetQuery(con,
+    "SELECT DISTINCT Year FROM FilmMusicFacts ORDER BY Year DESC")
+year_one <- available_years$Year[2]
+year_two <- available_years$Year[1]
+
+# facts to be used in the next text block
+sales_by_years <- dbGetQuery(con, "SELECT Year, SUM(TotalRevenue) AS Total FROM FilmMusicFacts GROUP BY Year")
+sales_by_country <- dbGetQuery(con,
+    "SELECT Country, SUM(TotalRevenue) AS Total FROM FilmMusicFacts GROUP BY Country ORDER BY SUM(TotalRevenue) DESC LIMIT 5")
+
+total_revenue_by_country_query <- sprintf("
+    SELECT
+        Country,
+        SUM(CASE WHEN Year = %s THEN TotalRevenue ELSE 0 END) AS '%s',
+        SUM(CASE WHEN Year = %s THEN TotalRevenue ELSE 0 END) AS '%s',
+        SUM(TotalRevenue) AS 'Total(All Years)'
+    FROM FilmMusicFacts
+        GROUP BY Country
+        ORDER BY SUM(TotalRevenue) DESC
+        LIMIT 5;",
+    year_one, year_one, year_two, year_two)
+
+
+res <- dbGetQuery(con, total_revenue_by_country_query)
+```
+The year with the most sales was `r sales_by_years$Year[1]` with a total revenue across both business units of `r sprintf("%.2f", sales_by_years$Total[1])`$.
+The country with the most sales was `r sales_by_country$Country[1]` with total sales across both business units in `r year_one` of `r res[res$Country == sales_by_country$Country[1], year_one]`
+It was followed by the `r sales_by_country$Country[2]` with `r res[res$Country == sales_by_country$Country[2], year_one]`.
+
+The table below shows sales revenue by country and ordered by total sales for the two most recent years, 2022 and 2023.
+The table is restricted to the top five countries with the most sales. The column ‘Total’ in the table represents the total for all years for which there is data and not just the past two years.
+
+```{r comparative_sales_chart, echo=TRUE, warning=FALSE}
+# adding commas to numbers
+res[, -1] <- lapply(res[, -1], function(x) {
+  format(round(x), nsmall = 0, big.mark = ",")
+})
+
+# kable for formatted table
+kbl(res,
+    caption = "Total Revenue For Top Five Countries For Most Recent Two Years",
+    booktabs = TRUE,
+    align = "r") %>%
+  kable_classic(full_width = FALSE, html_font = "Cambria", bootstrap_options = c("striped", "hover")) %>%
+  column_spec(column = 2:ncol(res), width = "8em")
+```
+
+The table below shows the revenue broken down by quarter for the top five countries.
+It shows the total revenue for each quarter across all business units and years.
+So, for example, the column “Q1” is the total sales for music and film for all years for which there is data,
+which is from `r min(available_years$Year)` to `r max(available_years$Year)`.
+
+```{r comparative_sales_table, echo=TRUE, warning=FALSE}
+# Total revenue by quarter/country
+query <- "
+    SELECT
+        Country,
+        SUM(CASE WHEN Quarter = 1 THEN TotalRevenue ELSE 0 END) AS 'Q1',
+        SUM(CASE WHEN Quarter = 2 THEN TotalRevenue ELSE 0 END) AS 'Q2',
+        SUM(CASE WHEN Quarter = 3 THEN TotalRevenue ELSE 0 END) AS 'Q3',
+        SUM(CASE WHEN Quarter = 4 THEN TotalRevenue ELSE 0 END) AS 'Q4',
+        AVG(TotalRevenue) AS Average
+
+    FROM FilmMusicFacts
+        GROUP BY Country
+        ORDER BY SUM(TotalRevenue) DESC
+        LIMIT 5;
+"
+res <- dbGetQuery(con, query)
+
+# Formatting
+res[, -1] <- lapply(res[, -1], function(x) {
+  format(round(x), nsmall = 0, big.mark = ",")
+})
+kbl(res,
+    caption = " Cumulative and Average Quarterly Revenue ",
+    booktabs = TRUE,
+    align = "r") %>%
+  kable_classic(full_width = FALSE, html_font = "Cambria", bootstrap_options = c("striped", "hover")) %>%
+  column_spec(column = 2:ncol(res), width = "6em")
+```
+
+## 2.2. Customer Distribution
+
+```{r top_customers_chart, echo=TRUE, warning=FALSE}
+# facts for the next text block
+num_customers <- dbGetQuery(con, "SELECT SUM(NumCust) AS Total FROM FilmMusicCustomers")
+num_countries <- dbGetQuery(con, "SELECT COUNT(Country) AS Total FROM FilmMusicCustomers")
+countries_with_most_cust <- dbGetQuery(con,
+    "SELECT
+        Country,
+        SUM(NumCust)
+
+    FROM FilmMusicCustomers
+    k
+    GROUP BY Country
+    ORDER BY SUM(NumCust)
+    DESC LIMIT 5"
+)
+```
+Across both business units, there are `r num_customers$Total` customers in `r num_countries$Total` different countries,
+with the majority of customers in `r countries_with_most_cust$Country[1]`, `r countries_with_most_cust$Country[2]`, and `r countries_with_most_cust$Country[3]`.
+
+```{r customers_by_business_unit, echo = TRUE, warning=FALSE}
+# Count customers by business unit
+query <- "
+    SELECT
+        Country,
+        SUM(CASE WHEN Medium = 'Film' THEN NumCust ELSE 0 END) AS Film,
+        SUM(CASE WHEN Medium = 'Music' THEN NumCust ELSE 0 END) AS Music,
+        SUM(NumCust) AS Total
+
+    FROM FilmMusicCustomers
+        GROUP BY Country
+        ORDER BY Total DESC
+        LIMIT 5;
+"
+res <- dbGetQuery(con, query)
+
+# Build the table
+res[, -1] <- lapply(res[, -1], function(x) {
+  format(round(x), nsmall = 0, big.mark = ",")
+})
+kbl(res,
+    caption = "Customers Accross Business Units",
+    booktabs = TRUE,
+    align = "r") %>%
+  kable_classic(full_width = FALSE, html_font = "Cambria", bootstrap_options = c("striped", "hover")) %>%
+  column_spec(column = 2:ncol(res), width = "8em")
+```
+
+## 2.3. Film. vs Music Revenue
+
+Sales fluctuate over time and the table below shows total revenue per month for the years for which we have data.
+```{r, film_vs_music, echo = TRUE, warning = FALSE}
+years_sorted <- sort(available_years$Year)
+
+sql_cols <- lapply(years_sorted, function(element) {
+    return(paste0("SUM(CASE WHEN Year = '", element, "' THEN TotalRevenue ELSE 0 END) AS '", element, "'"))
+})
+sql_cols_str <- paste(sql_cols, collapse = ", ")
+
+query <- sprintf("SELECT Medium, %s, SUM(TotalRevenue) AS Total FROM FilmMusicFacts GROUP BY Medium;", sql_cols_str)
+res <- dbGetQuery(con, query)
+
+# Format the numeric columns
+res[, -1] <- lapply(res[, -1], function(x) {
+  format(round(x), nsmall = 0, big.mark = ",")
+})
+
+kbl(res,
+    caption = "Revenue by year and business unit ",
+    booktabs = TRUE,
+    align = "r") %>%
+  kable_classic(full_width = FALSE, html_font = "Cambria", bootstrap_options = c("striped", "hover")) %>%
+  column_spec(column = 2:ncol(res), width = "8em")
+```
+The graph below illustrates the quarterly growth of the film and music business over the past years for which we have data.
+```{r, film_vs_music_plot, echo = FALSE, warning = FALSE}
+# Uses sorted list of years to create a select for very year quarter combination
+years_and_quarters <- lapply(years_sorted, function(element) {
+    return(
+        paste0(
+            "SUM(CASE WHEN Year = '", element, "' AND Quarter = 1 THEN TotalRevenue ELSE 0 END) AS '", element, ".Q1',",
+            "SUM(CASE WHEN Year = '", element, "' AND Quarter = 2 THEN TotalRevenue ELSE 0 END) AS '", element, ".Q2',",
+            "SUM(CASE WHEN Year = '", element, "' AND Quarter = 3 THEN TotalRevenue ELSE 0 END) AS '", element, ".Q3',",
+            "SUM(CASE WHEN Year = '", element, "' AND Quarter = 4 THEN TotalRevenue ELSE 0 END) AS '", element, ".Q4'"
+        )
+    )
+})
+
+# Get the rows for the plot
+years_and_quarters <- paste(years_and_quarters, collapse = ", ")
+query <- sprintf("SELECT %s FROM FilmMusicFacts WHERE MEDIUM = 'Film';", years_and_quarters)
+film_res <- dbGetQuery(con, query)
+query <- sprintf("SELECT %s FROM FilmMusicFacts WHERE MEDIUM = 'Music';", years_and_quarters)
+music_res <- dbGetQuery(con, query)
+film_sales <- as.numeric(film_res[1, ])
+music_sales <- as.numeric(music_res[1, ])
+
+# Ensure 0s are not plotted
+music_sales <- lapply(music_sales, function(x) ifelse(x == 0, NA, x))
+film_sales <- lapply(film_sales, function(x) ifelse(x == 0, NA, x))
+
+quarters <- names(film_res)
+quarter_numeric <- 1:length(quarters)
+
+# Adjust formatting
+par(mgp = c(4.5, 1, 0))
+par(mar = c(9, 6, 5, 3) + 0.1)
+
+plot(
+    x = quarter_numeric,
+    y = film_sales,
+    main = "Total Revenue by Quarter",
+    xlab = "Quarter",
+    ylab = "Total Revenue ($)",
+    col = "darkgreen",
+    pch = 19,
+    type = "b",
+    xaxt = "n"
+)
+
+lines(
+    x = quarter_numeric,
+    y = film_sales,
+    col = "red",
+    pch = 19,
+    type = "b"
+)
+
+lines(
+    x = quarter_numeric,
+    y = music_sales,
+    col = "blue",
+    pch = 19,
+    type = "b"
+)
+
+axis(
+    side = 1,
+    at = quarter_numeric,
+    labels = quarters,
+    las = 2
+)
+
+legend("topright",
+       legend = c("Film Revenue", "Music Revenue"),
+       col = c("red", "blue"),
+       pch = c(19, 19),
+       bty = "n")
+```
+
+```{r final_table, echo = TRUE, warning=FALSE}
+# Top 3 years (sorted desc)
+years <- sort(dbGetQuery(con, "SELECT DISTINCT Year FROM FilmMusicFacts ORDER BY Year DESC")$Year, decreasing = TRUE)[1:3]
+
+# Get top 5 countries (for those years)
+top_countries_query <- sprintf("
+    SELECT Country, SUM(TotalUnitsSold) AS Total
+    FROM FilmMusicFacts
+    WHERE Year IN (%s)
+    GROUP BY Country
+    ORDER BY Total DESC
+    LIMIT 5
+", paste(years, collapse = ", "))
+top_countries <- dbGetQuery(con, top_countries_query)
+
+query <- sprintf("
+    SELECT Country, Year, Quarter, SUM(TotalUnitsSold) as UnitsSold
+    FROM FilmMusicFacts
+    WHERE Country IN ('%s') AND Year IN (%s)
+    GROUP BY Country, Year, Quarter
+", paste(top_countries$Country, collapse = "', '"), paste(years, collapse = ", "))
+
+quarterly_sales <- dbGetQuery(con, query)
+
+yearly_totals <- aggregate(UnitsSold ~ Country + Year, data = quarterly_sales, FUN = sum)
+yearly_totals$Quarter <- "Total"
+yearly_averages <- aggregate(UnitsSold ~ Country + Year, data = quarterly_sales, FUN = mean)
+yearly_averages$Quarter <- "Average"
+
+presentation_df <- rbind(
+  quarterly_sales[, c("Country", "Year", "Quarter", "UnitsSold")],
+  yearly_totals,
+  yearly_averages
+)
+
+final_table_data <- reshape(
+  presentation_df,
+  direction = "wide",
+  idvar = c("Country", "Quarter"),
+  timevar = "Year"
+)
+
+names(final_table_data) <- gsub("UnitsSold.", "", names(final_table_data))
+
+year_cols <- as.character(years)
+final_table_data$Total <- rowSums(final_table_data[, year_cols], na.rm = TRUE)
+final_table_data$Average <- rowMeans(final_table_data[, year_cols], na.rm = TRUE)
+
+final_table_data$Quarter <- factor(final_table_data$Quarter, levels = c("1", "2", "3", "4", "Total", "Average"))
+final_table_data <- final_table_data[order(final_table_data$Country, final_table_data$Quarter), ]
+
+levels(final_table_data$Quarter)[1:4] <- paste0("Q", 1:4)
+
+numeric_cols <- c(year_cols, "Total", "Average")
+final_table_data[numeric_cols] <- lapply(final_table_data[numeric_cols], function(x) {
+  format(round(x), nsmall = 0, big.mark = ",")
+})
+
+group_index <- table(final_table_data$Country)
+
+kable_df <- final_table_data[, -which(names(final_table_data) == "Country")]
+
+kbl(kable_df,
+    caption = "Number of units sold by country and business unit for past three years.",
+    col.names = c("", year_cols, "Total", "Average"),
+    align = "rccccc",
+    booktabs = TRUE,
+    row.names = FALSE) %>%
+  kable_classic(full_width = FALSE, html_font = "Cambria") %>%
+  add_header_above(c(" " = 1, "Years" = 3, " " = 2)) %>%
+  pack_rows(index = group_index, bold = TRUE)
+```
+
+# 3. Summary and Recomendations
+
+Based on the available data, the analysis of Media Distributors, Inc.’s film and music sales reveals a robust revenue generation pattern, with Canada and the United States emerging as the primary contributors to the company’s total sales.
+Sales peaked in 2005, with total revenue reaching 66,892.38 from just film.
+Film sales contribute all revenue in 2005 with music contribuiting modestly and consistently between 2009 and 2013.
+The customer base is concentrated in India, the China, and USA, which also serve as the top-performing markets.
+
+Despite these strengths, Media Distributors, Inc. faces challenges related to its siloed information systems.
+With plans for acquisition, the company must present a cohesive and integrated business view to appeal to potential buyers.
+With nearly 658 customers across 115 countries, Media Distributors should invest in customer relationship management (CRM) tools to personalize outreach and foster loyalty.
